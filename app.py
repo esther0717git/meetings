@@ -1,90 +1,61 @@
-#!/usr/bin/env python3
-"""
-Streamlit App: Conflict Resolution & Smart Rebooking
-
-This demo asks for:
-  - Room ID
-  - Number of attendees
-  - Desired date & time
-and then:
-  1. Checks for an overlapping booking
-  2. If underutilized, offers a negotiation prompt
-  3. Otherwise suggests the next free 30-min slot (up to 4 hours)
-"""
-import os
-import sys
-# Ensure helper modules in /mnt/data or current dir are on the path
-sys.path.insert(0, "/mnt/data")
-sys.path.insert(0, ".")
-
 import streamlit as st
-from datetime import datetime, timedelta
-from find_available_rooms import find_available_rooms
-from search_room import get_conflicting_booking
+import datetime
+import pytz
+from typing import List
 
-# --- Helpers ---
-def parse_duration(hours: float) -> timedelta:
-    return timedelta(hours=hours)
+# Import the SuggestParticipantAvailability tool and helpers
+from shopee_smart_arrange_meeting_bot_tools.tools.suggest_participant_availability import SuggestParticipantAvailability
 
+# Streamlit app
+def main():
+    st.title("Participant Availability Suggestion Tool")
+    st.markdown(
+        """
+        Enter a time range, meeting duration, and participant emails to find available time slots.
+        """
+    )
 
-def suggest_next_slot(room: str, start: datetime, duration: timedelta, pax: int):
-    """
-    Slide the start time by 30-minute increments up to 4 hours to find a free slot.
-    Returns (next_start, next_end) or (None, None).
-    """
-    for i in range(1, 9):
-        alt_start = start + timedelta(minutes=30 * i)
-        alt_end = alt_start + duration
+    # User inputs
+    start_input = st.text_input(
+        "Search Start Time (YYYY-MM-DD HH:MM)",
+        value="2025-07-15 09:30"
+    )
+    end_input = st.text_input(
+        "Search End Time (YYYY-MM-DD HH:MM)",
+        value="2025-07-15 18:00"
+    )
+    duration_minutes = st.number_input(
+        "Meeting Duration (minutes)", min_value=1, value=30
+    )
+    emails_input = st.text_area(
+        "Participant Emails (comma-separated)",
+        value="alice@sea.com, bob@sea.com"
+    )
+
+    if st.button("Suggest Availability"):
         try:
-            free_rooms = find_available_rooms(room, alt_start, duration, pax)
-        except Exception:
-            free_rooms = []
-        if room in free_rooms:
-            return alt_start, alt_end
-    return None, None
+            # Parse inputs
+            emails = [e.strip() for e in emails_input.split(",") if e.strip()]
 
-# --- Streamlit UI ---
-st.set_page_config(page_title="Conflict Resolution Demo", layout="centered")
-st.title("Conflict Resolution & Smart Rebooking")
-
-# Input fields
-room = st.text_input("Room ID (e.g. Room A)", value="Room A")
-pax = st.number_input("Number of attendees", min_value=1, max_value=100, value=5)
-date = st.date_input("Date", value=datetime.today().date())
-time = st.time_input("Start time", value=datetime.now().time().replace(second=0, microsecond=0))
-duration_hr = st.number_input("Duration (hours)", min_value=0.5, max_value=4.0, value=1.0, step=0.5)
-
-duration = parse_duration(duration_hr)
-
-if st.button("Check Conflict & Suggest"):
-    start = datetime.combine(date, time)
-    # 1) Conflict check
-    try:
-        conflict = get_conflicting_booking(room, start, duration)
-    except Exception:
-        conflict = None
-
-    if conflict is None:
-        st.success(f"✅ {room} is available at {start.strftime('%H:%M')} for {pax} people.")
-    else:
-        booked_by = getattr(conflict, 'user', 'someone')
-        booked_pax = getattr(conflict, 'attendees', '?')
-        # 2) Under-utilized negotiation
-        if hasattr(conflict, 'attendees') and conflict.attendees < pax:
-            st.warning(
-                f"⚠️ {room} is already booked by {booked_by} for {booked_pax} people. "
-                "Would you like to negotiate to share or swap?"
+            # Instantiate the tool
+            tool = SuggestParticipantAvailability()
+            # Call the tool's _run method directly
+            results = tool._run(
+                search_start_time=start_input,
+                search_end_time=end_input,
+                duration_minutes=int(duration_minutes),
+                emails=emails
             )
-        else:
-            # 3) Fallback suggestion
-            next_start, next_end = suggest_next_slot(room, start, duration, pax)
-            if next_start:
-                st.info(
-                    f"No rooms at {start.strftime('%H:%M')}, but {room} is free from "
-                    f"{next_start.strftime('%H:%M')}–{next_end.strftime('%H:%M')}. "
-                    "Should I book this instead?"
-                )
+
+            if isinstance(results, dict) and results.get("error"):
+                st.error(f"Error: {results['error']}\nDetails: {results.get('details')}")
             else:
-                st.error(
-                    f"Sorry, no free slot in {room} within 4 hours of {start.strftime('%H:%M')}"
-                )
+                # Display results as JSON or table
+                st.subheader("Available Slots")
+                st.json(results)
+
+        except Exception as e:
+            st.error(f"Unexpected error: {e}")
+
+if __name__ == "__main__":
+    main()
