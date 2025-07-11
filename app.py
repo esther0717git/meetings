@@ -14,8 +14,8 @@ and then:
 import os
 import sys
 # Ensure helper modules in /mnt/data or current dir are on the path
-sys.path.insert(0, os.path.join(os.getcwd(), "mnt/data"))
-sys.path.insert(0, os.getcwd())
+sys.path.insert(0, "/mnt/data")
+sys.path.insert(0, ".")
 
 import streamlit as st
 from datetime import datetime, timedelta
