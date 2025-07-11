@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 """
 Streamlit Smart Meeting Room Booking App
@@ -74,7 +73,6 @@ def show_booking_modal():
                         st.info("Negotiation message sent.")
                 else:
                     # Fallback suggestion
-                    # find next free slot in same room up to 4 hours
                     suggestion = None
                     for i in range(1, 9):
                         alt_start = start + timedelta(minutes=30 * i)
@@ -102,4 +100,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
