@@ -1,280 +1,136 @@
-import streamlit as st
-import pandas as pd
-import re
-from io import BytesIO
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
-from openpyxl.utils import get_column_letter
+#!/usr/bin/env python3
+"""
+Smart Room Booking Bot: Conflict Resolution & Negotiation
 
-# ───── Streamlit setup ────────────────────────────────────────────────────────
-st.set_page_config(page_title="Visitor List Cleaner", layout="wide")
-st.title("🇸🇬 CLARITY GATE - VISITOR DATA CLEANING & VALIDATION 🫧")
+When you request a room for N people at a given time, this script will:
+  1. Check if the requested room is free.
+  2. If it’s booked by fewer people, prompt you to negotiate with them.
+  3. Otherwise, suggest the next free 30-minute slot (up to 4 hours ahead).
+"""
 
-# ───── Download Sample Template ───────────────────────────────────────────────
-with open("sample_template.xlsx", "rb") as f:
-    st.download_button(
-        label="📎 Download Sample Template",
-        data=f,
-        file_name="sample_template.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import List, Optional
+import argparse
+import sys
 
-# ───── Helper functions ────────────────────────────────────────────────────────
+@dataclass
+class Room:
+    id: str
+    capacity: int
 
-def nationality_group(row):
-    nat = str(row["Nationality (Country Name)"]).strip().lower()
-    pr  = str(row["PR"]).strip().lower()
-    if nat == "singapore":
-        return 1
-    elif pr in ("yes", "y", "pr"):
-        return 2
-    elif nat == "malaysia":
-        return 3
-    elif nat == "india":
-        return 4
-    else:
-        return 5
+@dataclass
+class Booking:
+    room: Room
+    start: datetime
+    end: datetime
+    attendees: int
+    user: str
 
-def split_name(full_name):
-    s = str(full_name).strip()
-    if " " in s:
-        i = s.find(" ")
-        return pd.Series([s[:i], s[i+1:]])
-    return pd.Series([s, ""])
+def overlaps(a: Booking, b: Booking) -> bool:
+    """Return True if bookings a and b overlap in time."""
+    return not (a.end <= b.start or a.start >= b.end)
 
-def clean_gender(g):
-    v = str(g).strip().upper()
-    if v == "M":
-        return "Male"
-    if v == "F":
-        return "Female"
-    if v in ("MALE","FEMALE"):
-        return v.title()
-    return v
+def find_conflicting_booking(req: Booking, existing: List[Booking]) -> Optional[Booking]:
+    """Return the first booking in the same room that overlaps with req, or None."""
+    for b in existing:
+        if b.room.id == req.room.id and overlaps(req, b):
+            return b
+    return None
 
-# ───── Core Cleaning Logic ────────────────────────────────────────────────────
+def suggest_for_request(room: Room,
+                        num_people: int,
+                        start: datetime,
+                        duration: timedelta,
+                        existing: List[Booking]) -> str:
+    """
+    Core logic: for your request, either confirm, negotiate, suggest fallback, or apologize.
+    """
+    req = Booking(room, start, start + duration, num_people, user="you")
 
-def clean_data(df: pd.DataFrame) -> pd.DataFrame:
-    # 1) Trim to exactly 13 cols then rename
-    df = df.iloc[:, :13]
-    df.columns = [
-        "S/N",
-        "Vehicle Plate Number",
-        "Company Full Name",
-        "Full Name As Per NRIC",
-        "First Name as per NRIC",
-        "Middle and Last Name as per NRIC",
-        "Identification Type",
-        "IC (Last 3 digits and suffix) 123A",
-        "Work Permit Expiry Date",
-        "Nationality (Country Name)",
-        "PR",
-        "Gender",
-        "Mobile Number",
+    # 1) Room is free: confirm immediately
+    conflict = find_conflicting_booking(req, existing)
+    if not conflict:
+        return (f"{room.id} is free for {num_people} people at "
+                f"{start.strftime('%-I:%M %p')}. Booking confirmed!")
+
+    # 2) Room is booked by fewer people: negotiation opportunity
+    if conflict.attendees < num_people:
+        return (f"{room.id} is booked at {start.strftime('%-I:%M %p')} by "
+                f"{conflict.user} for only {conflict.attendees} people. "
+                f"Would you like me to message them to see if you can share or swap?")
+
+    # 3) Time-fallback within the same room
+    for i in range(1, 9):  # up to 4 hours ahead in 30-min steps
+        alt_start = start + timedelta(minutes=30 * i)
+        alt_end   = alt_start + duration
+        alt_req   = Booking(room, alt_start, alt_end, num_people, user="you")
+        if not find_conflicting_booking(alt_req, existing):
+            return (f"No rooms at {start.strftime('%-I:%M %p')}, but {room.id} is free from "
+                    f"{alt_start.strftime('%-I:%M')}–{alt_end.strftime('%-I:%M')}. "
+                    "Should I book this instead?")
+
+    # 4) No options found
+    return (f"Sorry, I couldn’t find any free or negotiable slot in "
+            f"{room.id} within the next 4 hours.")
+
+def load_sample_data() -> (List[Room], List[Booking]):
+    """
+    Stub: in a real system, replace this with a database/API call to fetch:
+      - Available rooms (and their capacities)
+      - Current bookings
+    """
+    rooms = [
+        Room("Room A", capacity=5),
+        Room("Room B", capacity=8),
+        Room("Room C", capacity=10),
     ]
+    existing = [
+        # Example: Alice booked Room A from 14:00 to 15:00 for 2 people
+        Booking(rooms[0],
+                start=datetime(2025,7,11,14,0),
+                end  =datetime(2025,7,11,15,0),
+                attendees=2,
+                user="alice"),
+    ]
+    return rooms, existing
 
-    # 2) Drop rows where all of D–M are blank
-    df = df.dropna(subset=df.columns[3:13], how="all")
+def parse_args():
+    p = argparse.ArgumentParser(description="Request a meeting room.")
+    p.add_argument("--room",  required=True,
+                   help="Room ID (e.g. 'Room A')")
+    p.add_argument("--people", type=int, required=True,
+                   help="Number of attendees")
+    p.add_argument("--time",   required=True,
+                   help="Start time in 'YYYY-MM-DD HH:MM' (24h)")
+    p.add_argument("--duration", type=float, default=1.0,
+                   help="Duration in hours (default: 1.0)")
+    return p.parse_args()
 
-    # 3) Normalize nationality (incl. Indian → India)
-    nat_map = {
-        "chinese":     "China",
-        "singaporean": "Singapore",
-        "malaysian":   "Malaysia",
-        "indian":      "India",
-    }
-    df["Nationality (Country Name)"] = (
-        df["Nationality (Country Name)"]
-          .astype(str)
-          .str.strip()
-          .str.lower()
-          .replace(nat_map, regex=False)
-          .str.title()
-    )
+def main():
+    args = parse_args()
 
-    # 4) Sort by Company → nat-group → Country → Full Name
-    df["SortGroup"] = df.apply(nationality_group, axis=1)
-    df = (
-        df.sort_values(
-            ["Company Full Name","SortGroup","Nationality (Country Name)","Full Name As Per NRIC"],
-            ignore_index=True,
-        )
-        .drop(columns="SortGroup")
-    )
+    # 1) Load rooms & current bookings (replace with real data source)
+    rooms, existing = load_sample_data()
 
-    # 5) Reset S/N
-    df["S/N"] = range(1, len(df) + 1)
+    # 2) Find the requested Room object
+    matching = [r for r in rooms if r.id.lower() == args.room.lower()]
+    if not matching:
+        print(f"Error: Room '{args.room}' not found.", file=sys.stderr)
+        sys.exit(1)
+    room = matching[0]
 
-    # 6) Standardize Vehicle Plate Number
-    df["Vehicle Plate Number"] = (
-        df["Vehicle Plate Number"]
-          .astype(str)
-          .str.replace(r"[\/,]", ";", regex=True)
-          .str.replace(r"\s*;\s*", ";", regex=True)
-          .str.strip()
-          .replace("nan","", regex=False)
-    )
+    # 3) Parse time & duration
+    try:
+        start = datetime.strptime(args.time, "%Y-%m-%d %H:%M")
+    except ValueError:
+        print("Error: time must be in 'YYYY-MM-DD HH:MM' format.", file=sys.stderr)
+        sys.exit(1)
+    duration = timedelta(hours=args.duration)
 
-    # 7) Proper-case & split names
-    df["Full Name As Per NRIC"] = df["Full Name As Per NRIC"].astype(str).str.title()
-    df[["First Name as per NRIC","Middle and Last Name as per NRIC"]] = (
-        df["Full Name As Per NRIC"].apply(split_name)
-    )
+    # 4) Compute suggestion
+    suggestion = suggest_for_request(room, args.people, start, duration, existing)
+    print(suggestion)
 
-    # 8) Swap IC vs WP if reversed
-    iccol, wpcol = "IC (Last 3 digits and suffix) 123A", "Work Permit Expiry Date"
-    if df[iccol].astype(str).str.contains("-", na=False).any():
-        df[[iccol, wpcol]] = df[[wpcol, iccol]]
-
-    # 9) Trim IC suffix
-    df[iccol] = df[iccol].astype(str).str[-4:]
-
-# 10) Fix Mobile Number back to the original 8 digits—
-    def fix_mobile(x):
-        d = re.sub(r"\D", "", str(x))
-        # if too long...
-        if len(d) > 8:
-            extra = len(d) - 8
-            # if the extras are just decimal zeros, strip from the right
-            if d.endswith("0" * extra):
-                d = d[:-extra]
-            else:
-                # otherwise assume it's a country code and drop from the left
-                d = d[-8:]
-        # if too short, left-pad with zeros
-        if len(d) < 8:
-            d = d.zfill(8)
-        return d
-
-    df["Mobile Number"] = df["Mobile Number"].apply(fix_mobile)
-
-    # 11) Normalize gender
-    df["Gender"] = df["Gender"].apply(clean_gender)
-
-    # 12) Format Work Permit Expiry Date → YYYY-MM-DD
-    df[wpcol] = pd.to_datetime(df[wpcol], errors="coerce").dt.strftime("%Y-%m-%d")
-
-    return df
-
-# ───── Build & style the single sheet Excel ────────────────────────────────────
-
-def generate_visitor_only(df: pd.DataFrame) -> BytesIO:
-    buf = BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Visitor List")
-        ws = writer.sheets["Visitor List"]
-
-        # styling objects
-        header_fill  = PatternFill("solid", fgColor="94B455")
-        warning_fill = PatternFill("solid", fgColor="FFCCCC")
-        border       = Border(Side("thin"),Side("thin"),Side("thin"),Side("thin"))
-        center       = Alignment("center","center")
-        normal_font  = Font(name="Calibri", size=9)
-        bold_font    = Font(name="Calibri", size=9, bold=True)
-
-        # 1) Apply borders, alignment, font
-        for row in ws.iter_rows():
-            for cell in row:
-                cell.border    = border
-                cell.alignment = center
-                cell.font      = normal_font
-
-        # 2) Style header row
-        for col in range(1, ws.max_column + 1):
-            h = ws[f"{get_column_letter(col)}1"]
-            h.fill = header_fill
-            h.font = bold_font
-
-        # 3) Freeze top row
-        ws.freeze_panes = ws["A2"]
-
-        # 4) Validation & highlight errors
-        errors = 0
-        for r in range(2, ws.max_row + 1):
-            idt = str(ws[f"G{r}"].value).strip().upper()
-            nat = str(ws[f"J{r}"].value).strip().title()
-            pr  = str(ws[f"K{r}"].value).strip().lower()
-            bad = False
-
-            # → only NRIC may have PR=yes
-            if idt != "NRIC" and pr in ("yes","y","pr"):
-                bad = True
-
-            # → FIN must not be Singapore or carry PR
-            if idt == "FIN" and (nat == "Singapore" or pr in ("yes","y","pr")):
-                bad = True
-
-            # → NRIC must be either Singapore or foreign+PR
-            if idt == "NRIC" and not (nat == "Singapore" or pr in ("yes","y","pr")):
-                bad = True
-
-            if bad:
-                for c in ("G","J","K"):
-                    ws[f"{c}{r}"].fill = warning_fill
-                errors += 1
-
-        if errors:
-            st.warning(f"⚠️ {errors} validation error(s) found.")
-
-        # 5) Auto-fit columns & set row height
-        for col in ws.columns:
-            w = max(len(str(cell.value)) for cell in col if cell.value)
-            ws.column_dimensions[get_column_letter(col[0].column)].width = w + 2
-        for row in ws.iter_rows():
-            ws.row_dimensions[row[0].row].height = 20
-
-        # 6) Vehicles summary
-        plates = []
-        for v in df["Vehicle Plate Number"].dropna():
-            plates += [x.strip() for x in str(v).split(";") if x.strip()]
-        ins = ws.max_row + 2
-        if plates:
-            ws[f"B{ins}"].value     = "Vehicles"
-            ws[f"B{ins}"].border    = border
-            ws[f"B{ins}"].alignment = center
-            ws[f"B{ins+1}"].value   = ";".join(sorted(set(plates)))
-            ws[f"B{ins+1}"].border  = border
-            ws[f"B{ins+1}"].alignment = center
-            ins += 2
-
-        # 7) Total Visitors
-        ws[f"B{ins}"].value     = "Total Visitors"
-        ws[f"B{ins}"].border    = border
-        ws[f"B{ins}"].alignment = center
-        ws[f"B{ins+1}"].value   = df["Company Full Name"].notna().sum()
-        ws[f"B{ins+1}"].border  = border
-        ws[f"B{ins+1}"].alignment = center
-
-    buf.seek(0)
-    return buf
-
-# ───── Streamlit UI: Upload & Download ────────────────────────────────────────
-uploaded = st.file_uploader("📁 Upload your Excel file", type=["xlsx"])
-if uploaded:
-    # 1) Read the "Visitor List" sheet
-    raw_df = pd.read_excel(uploaded, sheet_name="Visitor List")
-
-    # 2) Capture Company Name in cell C2 (excel row 2, column C → pandas row 0, col 2)
-    company_cell = raw_df.iloc[0, 2]
-    company = (
-        str(company_cell).strip()
-        if pd.notna(company_cell) and str(company_cell).strip()
-        else "VisitorList"
-    )
-
-    # 3) Clean & generate output
-    cleaned = clean_data(raw_df)
-    out_buf = generate_visitor_only(cleaned)
-
-    # 4) Build filename: CompanyName_YYYYMMDD.xlsx in Asia/Singapore time
-    today = datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y%m%d")
-    fname = f"{company}_{today}.xlsx"
-
-    # 5) Serve download
-    st.download_button(
-        label="📥 Download Cleaned Visitor List",
-        data=out_buf.getvalue(),
-        file_name=fname,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+if __name__ == "__main__":
+    main()
